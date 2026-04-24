@@ -2,104 +2,209 @@ const express = require('express');
 const axios = require('axios');
 const app = express();
 
-const TERABOX_DOMAINS = [
-  'terabox.com',
-  'teraboxapp.com',
-  '1024tera.com',
-  'freeterabox.com',
-  'terabox.fun',
-  'terabox.app',
-  'teraboxlink.com',
-  'terasharelink.com',
-  'terafileshare.com',
-  'teraboxshare.com'
+const DOMAINS = [
+  'terabox.com','teraboxapp.com','1024tera.com','freeterabox.com',
+  'terabox.fun','terabox.app','teraboxlink.com','terasharelink.com',
+  'terafileshare.com','teraboxshare.com','4funbox.com','mirrobox.com',
+  'nephobox.com','momerybox.com','tibibox.com'
 ];
 
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  'Accept': 'application/json, text/plain, */*',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Referer': 'https://www.terabox.com/',
-  'Origin': 'https://www.terabox.com'
-};
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-function extractShortUrl(url) {
-  for (const domain of TERABOX_DOMAINS) {
-    if (url.includes(domain)) return url;
+function getSurl(url) {
+  const m = url.match(/surl=([a-zA-Z0-9_-]+)/) || url.match(/\/s\/1([a-zA-Z0-9_-]+)/);
+  return m ? m[1] : null;
+}
+
+function isValidUrl(url) {
+  return DOMAINS.some(d => url.includes(d));
+}
+
+// ========== METHOD 1: Public Share API ==========
+async function method1_shareApi(surl) {
+  const { data } = await axios.get('https://www.terabox.com/api/shorturlinfo', {
+    params: { shorturl: `1${surl}`, root: 1 },
+    headers: { 'User-Agent': UA, Referer: 'https://www.terabox.com/' },
+    timeout: 15000
+  });
+  if (data.errno === 0 && data.list?.length) return data;
+  throw new Error('Method 1 failed');
+}
+
+// ========== METHOD 2: Share List Endpoint ==========
+async function method2_shareList(surl) {
+  const { data } = await axios.get('https://www.terabox.com/share/list', {
+    params: { app_id: '250528', shorturl: `1${surl}`, root: 1, page: 1, num: 1000 },
+    headers: { 'User-Agent': UA, Referer: 'https://www.terabox.com/' },
+    timeout: 15000
+  });
+  if (data.errno === 0 && data.list?.length) return data;
+  throw new Error('Method 2 failed');
+}
+
+// ========== METHOD 3: HTML Scrape - Extract from page JS ==========
+async function method3_scrape(url) {
+  const { data: html } = await axios.get(url, {
+    headers: {
+      'User-Agent': UA,
+      'Accept': 'text/html,application/xhtml+xml'
+    },
+    timeout: 20000,
+    maxRedirects: 5
+  });
+
+  // Extract JSON data embedded in page
+  const match = html.match(/window\.__InitialState\s*=\s*({.+?})\s*;?\s*<\/script>/s)
+    || html.match(/"list"\s*:\s*(\[.+?\])/s)
+    || html.match(/locals\.mbox\s*=\s*({.+?});/s);
+
+  if (!match) throw new Error('Method 3: no data in HTML');
+
+  let parsed;
+  try { parsed = JSON.parse(match[1]); } catch { throw new Error('Method 3: parse fail'); }
+
+  const list = parsed.list || parsed.file_list?.list || [parsed];
+  if (!list.length) throw new Error('Method 3: empty list');
+
+  return {
+    list,
+    shareid: parsed.shareid || parsed.share_id,
+    uk: parsed.uk || parsed.user?.uk,
+    sign: parsed.sign,
+    timestamp: parsed.timestamp
+  };
+}
+
+// ========== METHOD 4: Alternate domain rotation ==========
+async function method4_domainRotate(surl) {
+  const altDomains = [
+    'https://www.1024tera.com',
+    'https://www.4funbox.com',
+    'https://www.freeterabox.com',
+    'https://www.teraboxapp.com'
+  ];
+
+  for (const base of altDomains) {
+    try {
+      const { data } = await axios.get(`${base}/api/shorturlinfo`, {
+        params: { shorturl: `1${surl}`, root: 1 },
+        headers: { 'User-Agent': UA, Referer: `${base}/` },
+        timeout: 12000
+      });
+      if (data.errno === 0 && data.list?.length) return data;
+    } catch { continue; }
   }
-  return null;
+  throw new Error('Method 4: all domains failed');
 }
 
-function extractSurl(url) {
-  const match = url.match(/surl=([a-zA-Z0-9_-]+)/);
-  if (match) return match[1];
-  const pathMatch = url.match(/\/s\/1([a-zA-Z0-9_-]+)/);
-  if (pathMatch) return pathMatch[1];
-  return null;
+// ========== METHOD 5: DBox proxy API (public mirrors) ==========
+async function method5_publicProxy(surl) {
+  const proxies = [
+    `https://terabox-dl.qtcloud.workers.dev/api/get-info?shorturl=1${surl}`,
+    `https://teradl-api.vercel.app/api?shorturl=1${surl}`,
+  ];
+
+  for (const proxyUrl of proxies) {
+    try {
+      const { data } = await axios.get(proxyUrl, { timeout: 15000 });
+      if (data.list?.length || data.files?.length) return data;
+    } catch { continue; }
+  }
+  throw new Error('Method 5: proxies failed');
 }
 
-async function getFileInfo(shareUrl) {
-  const surl = extractSurl(shareUrl);
-  if (!surl) throw new Error('Invalid Terabox URL');
+// ========== MASTER EXTRACTOR - tries all methods ==========
+async function extractFileInfo(url, surl) {
+  const methods = [
+    () => method1_shareApi(surl),
+    () => method2_shareList(surl),
+    () => method3_scrape(url),
+    () => method4_domainRotate(surl),
+    () => method5_publicProxy(surl),
+  ];
 
-  const infoUrl = `https://www.terabox.com/api/shorturlinfo?shorturl=1${surl}&root=1`;
+  const errors = [];
 
-  const res = await axios.get(infoUrl, {
-    headers: HEADERS,
-    timeout: 30000
-  });
-
-  if (res.data.errno !== 0) throw new Error(`Terabox API error: ${res.data.errno}`);
-
-  const fileList = res.data.list || [];
-  const title = res.data.title || 'Unknown';
-  const uk = res.data.uk;
-  const shareid = res.data.shareid;
-
-  return { fileList, title, uk, shareid, surl };
-}
-
-async function getDownloadLink(fs_id, uk, shareid, surl) {
-  const dlUrl = `https://www.terabox.com/api/download?shareid=${shareid}&uk=${uk}&fid_list=[${fs_id}]&shorturl=1${surl}`;
-
-  const res = await axios.head(dlUrl, {
-    headers: HEADERS,
-    maxRedirects: 0,
-    validateStatus: (s) => s >= 200 && s < 400,
-    timeout: 30000
-  }).catch(err => {
-    if (err.response && err.response.headers.location) {
-      return { redirectUrl: err.response.headers.location };
+  for (let i = 0; i < methods.length; i++) {
+    try {
+      const result = await methods[i]();
+      console.log(`✅ Method ${i + 1} succeeded`);
+      return result;
+    } catch (err) {
+      errors.push(`Method ${i + 1}: ${err.message}`);
+      console.log(`❌ Method ${i + 1} failed, trying next...`);
     }
-    throw err;
-  });
+  }
 
-  return res.redirectUrl || res.headers?.location || dlUrl;
+  throw new Error(`All methods failed:\n${errors.join('\n')}`);
 }
 
-// === ROUTES ===
+// ========== DOWNLOAD LINK EXTRACTION ==========
+async function getDirectLink(fs_id, shareid, uk, surl) {
+  // Try multiple download endpoints
+  const endpoints = [
+    {
+      url: 'https://www.terabox.com/share/download',
+      params: { app_id: '250528', shareid, uk, fid_list: `[${fs_id}]`, shorturl: `1${surl}`, nozip: 0 }
+    },
+    {
+      url: 'https://www.1024tera.com/share/download',
+      params: { app_id: '250528', shareid, uk, fid_list: `[${fs_id}]`, shorturl: `1${surl}`, nozip: 0 }
+    },
+    {
+      url: 'https://www.freeterabox.com/share/download',
+      params: { app_id: '250528', shareid, uk, fid_list: `[${fs_id}]`, shorturl: `1${surl}`, nozip: 0 }
+    }
+  ];
+
+  for (const ep of endpoints) {
+    try {
+      const { data } = await axios.get(ep.url, {
+        params: ep.params,
+        headers: { 'User-Agent': UA, Referer: 'https://www.terabox.com/' },
+        timeout: 20000
+      });
+      if (data.dlink || data.list?.[0]?.dlink) {
+        return data.dlink || data.list[0].dlink;
+      }
+    } catch { continue; }
+  }
+
+  throw new Error('Could not get download link from any endpoint');
+}
+
+// ========== ROUTES ==========
 
 app.get('/api/info', async (req, res) => {
   try {
-    const { url } = req.query;
-    if (!url) return res.status(400).json({ error: 'url parameter required' });
+    const url = decodeURIComponent(req.query.url || '');
+    if (!url || !isValidUrl(url)) return res.status(400).json({ error: 'Invalid Terabox URL' });
 
-    const valid = extractShortUrl(decodeURIComponent(url));
-    if (!valid) return res.status(400).json({ error: 'Not a valid Terabox URL' });
+    const surl = getSurl(url);
+    if (!surl) return res.status(400).json({ error: 'Cannot extract surl' });
 
-    const { fileList, title, uk, shareid, surl } = await getFileInfo(valid);
+    const data = await extractFileInfo(url, surl);
+    const list = data.list || data.files || [];
 
-    const files = fileList.map(f => ({
-      name: f.server_filename,
+    const files = list.map(f => ({
+      name: f.server_filename || f.name || 'unknown',
       fs_id: f.fs_id,
-      size: f.size,
-      sizeMB: (f.size / (1024 * 1024)).toFixed(2) + ' MB',
+      size: f.size || 0,
+      sizeMB: ((f.size || 0) / (1024 * 1024)).toFixed(2) + ' MB',
       isDir: f.isdir === 1,
-      thumb: f.thumbs?.url3 || null,
-      path: f.path
+      thumb: f.thumbs?.url3 || f.thumb || null,
+      dlink: f.dlink || null
     }));
 
-    res.json({ success: true, title, uk, shareid, surl, files });
+    res.json({
+      success: true,
+      shareid: data.shareid,
+      uk: data.uk,
+      sign: data.sign,
+      timestamp: data.timestamp,
+      surl,
+      files
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -107,12 +212,16 @@ app.get('/api/info', async (req, res) => {
 
 app.get('/api/download', async (req, res) => {
   try {
-    const { fs_id, uk, shareid, surl } = req.query;
-    if (!fs_id || !uk || !shareid || !surl) {
-      return res.status(400).json({ error: 'fs_id, uk, shareid, surl required' });
+    const { fs_id, shareid, uk, surl, dlink } = req.query;
+
+    let link = dlink;
+    if (!link) {
+      if (!fs_id || !shareid || !uk || !surl) {
+        return res.status(400).json({ error: 'Need dlink OR (fs_id + shareid + uk + surl)' });
+      }
+      link = await getDirectLink(fs_id, shareid, uk, surl);
     }
 
-    const link = await getDownloadLink(fs_id, uk, shareid, surl);
     res.json({ success: true, downloadLink: link });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -121,51 +230,47 @@ app.get('/api/download', async (req, res) => {
 
 app.get('/api/stream', async (req, res) => {
   try {
-    const { url: dlUrl } = req.query;
-    if (!dlUrl) return res.status(400).json({ error: 'url param required' });
+    const dlUrl = decodeURIComponent(req.query.url || '');
+    if (!dlUrl) return res.status(400).json({ error: 'url required' });
 
-    const range = req.headers.range || undefined;
-    const headersToSend = { ...HEADERS };
-    if (range) headersToSend['Range'] = range;
+    const headers = { 'User-Agent': UA, Referer: 'https://www.terabox.com/' };
+    if (req.headers.range) headers['Range'] = req.headers.range;
 
     const response = await axios({
       method: 'GET',
-      url: decodeURIComponent(dlUrl),
-      headers: headersToSend,
+      url: dlUrl,
+      headers,
       responseType: 'stream',
       timeout: 0,
       maxContentLength: Infinity,
       maxBodyLength: Infinity
     });
 
-    const fwd = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
-    fwd.forEach(h => {
-      if (response.headers[h]) res.setHeader(h, response.headers[h]);
-    });
-
-    const cd = response.headers['content-disposition'];
-    if (cd) res.setHeader('Content-Disposition', cd);
+    ['content-type', 'content-length', 'content-range', 'accept-ranges', 'content-disposition']
+      .forEach(h => { if (response.headers[h]) res.setHeader(h, response.headers[h]); });
 
     res.status(response.status);
     response.data.pipe(res);
-
     response.data.on('error', () => res.end());
     req.on('close', () => response.data.destroy());
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
 
 app.get('/', (req, res) => {
   res.json({
-    status: 'running',
+    status: '🟢 alive',
+    cookies: 'NOT NEEDED',
+    methods: '5 fallback extraction methods',
     endpoints: {
-      info: '/api/info?url=TERABOX_LINK',
-      download: '/api/download?fs_id=X&uk=X&shareid=X&surl=X',
-      stream: '/api/stream?url=ENCODED_DL_URL'
-    }
+      '/api/info?url=TERABOX_LINK': 'Get file info',
+      '/api/download?fs_id=X&shareid=X&uk=X&surl=X': 'Get direct link',
+      '/api/stream?url=ENCODED_DL_LINK': 'Stream/proxy download (large files)'
+    },
+    supported: DOMAINS
   });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Terabox API live on ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Terabox API running on ${PORT} — 5 methods, 0 cookies`));
