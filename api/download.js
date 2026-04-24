@@ -6,7 +6,7 @@ const TERABOX_DOMAINS = [
   'freeterabox.com', 'terabox.app', 'terabox.fun',
   'teraboxlink.com', 'terasharelink.com', '4funbox.com',
   'mirrobox.com', 'nephobox.com', '1024terabox.com',
-  'terabox.club', 'momerybox.com', 'tibibox.com', 'gibibox.com'
+  'terabox.club', 'terasharefile.com', 'tibibox.com', 'gibibox.com'
 ];
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
