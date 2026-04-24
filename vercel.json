@@ -1,0 +1,11 @@
+{
+  "functions": {
+    "api/download.js": {
+      "maxDuration": 300,
+      "memory": 1024
+    }
+  },
+  "routes": [
+    { "src": "/download", "dest": "/api/download.js" }
+  ]
+}
